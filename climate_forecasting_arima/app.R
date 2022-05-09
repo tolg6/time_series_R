@@ -21,17 +21,39 @@ for(i in 1:dim(climate)[1])
     l = c(l,climate[i,j])
   }
 }
-l = l[-c(1707:1716)] # drop *** value
+l = l[-c(1707:1716)] # drop *** value 
 climate_new = data.frame(Date = x,Mean = as.numeric(l))
 
 ##create ts object
 climatets = ts(climate_new$Mean,start = c(1880,1,1),frequency = 12)
 
 
-# Predict 12SMA Data
+
+#####################
+# Predict 24SMA Data
+#####################
 sma12 = SMA(climatets,24)%>%na.omit()
+
+acf = ggAcf(sma12,lag.max = 80)+ggtitle(label = "ACF Plot Monthlt Climate Mean")
+pacf = ggPacf(sma12,lag.max = 80)+ggtitle(label = "PACF Plot Monthly Climate Mean")
+gridExtra::grid.arrange(acf,pacf)
+
+# Stationary
+ur.kpss(sma12)%>%summary() # seri durağan değil...
+
+# 1.fark
+
+first_diff = diff(sma12)
+ur.kpss(first_diff)%>%summary() # 1.fark serisi durağan
+ur.df(first_diff,selectlags = "AIC") # seri durağan
+acf1 = ggAcf(first_diff,lag.max = 80)+ggtitle(label = "ACF Plot Monthlt Climate Mean")
+pacf1 = ggPacf(first_diff,lag.max = 80)+ggtitle(label = "PACF Plot Monthly Climate Mean")
+gridExtra::grid.arrange(acf1,pacf1) # AR 3 MA 0-1
+
+# Split Data
 train = window(sma12,end = c(2020,12))
 test = window(sma12,start = c(2021,1))
+# Arıma(3,1,0)
 model = Arima(train,order = c(3,1,0))
 pred = forecast(model,h = length(test))
 acc = accuracy(pred,test)
@@ -42,9 +64,8 @@ pred1 = forecast(model1,h = length(test))
 acc1 = accuracy(expm1(pred1$mean),test)
 
 
-
 # Next 6 month predict
-full_model = Arima(log1p(climatets),order = c(4,1,2),seasonal = c(2,0,1))
+full_model = Arima(log1p(sma12),order = c(4,1,2),seasonal = c(2,0,1))
 pred_next = forecast(full_model,h = 24)
 climate_sep = climate_new%>%filter(Date > as.Date("2000-01-01"))
 climate_sep_ts = ts(climate_sep$Mean,start = c(2000,1),frequency = 12)
@@ -90,7 +111,7 @@ server <- function(input, output) {
       hc_add_series(SMA(date_filtered_data$Mean,36),type = "line",color = "blue",labels = "SMA36")%>%
       hc_title(text = "Mean Global Change")%>%
       hc_subtitle(text = "Souce : Nasa GISS")%>%
-      hc_xAxis(categories = c("1900", "1920", "1940", "1960", "1980", "2000", "2020"))
+      hc_xAxis(categories = c("1900", "1920", "1940", "1960", "1980", "2000", "2022"))
   })
   fitted_layer <- forecast::autolayer(pred$mean, series="ARIMA(3,1,0)",size = 2)
   fitted_values <- fitted_layer$layer_data()
@@ -99,7 +120,8 @@ server <- function(input, output) {
       fitted_layer +
       geom_point() +
       geom_point(data = fitted_values, aes(x = timeVal, y = seriesVal))+
-      ggtitle(label = paste0(" ARIMA(3,1,0) -- MAE : ",round(acc[6],3)))+ylab("Value")+theme_minimal()
+      ggtitle(label = paste0(" ARIMA(3,1,0) -- MAE : ",round(acc[6],3)))+
+      ylab("Value")+theme_minimal()
   })
   
   
@@ -112,7 +134,6 @@ server <- function(input, output) {
       geom_point(data = fitted_values1, aes(x = timeVal, y = seriesVal))+
       ggtitle(label = paste0(" ARIMA(4,1,2)(2,0,1) -- MAE : ",round(acc1[3],3)))+ylab("Value")+theme_minimal()
   })
-  
   
   fitted_layer2 <- forecast::autolayer(expm1(pred_next$mean), series="Forecast",size = .5)
   fitted_values2 <- fitted_layer2$layer_data()
