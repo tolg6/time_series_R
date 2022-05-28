@@ -1,0 +1,382 @@
+---
+title: "modeltime"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Library
+
+```{r LoadPackage,warning=FALSE,message=FALSE}
+library(tidyverse)
+library(ggplot2)
+library(stringr)
+library(lubridate)
+library(ggthemes)
+library(tidyquant)
+library(forecast)
+library(modeltime)
+library(gridExtra)
+library(urca)
+library(tidymodels)
+```
+
+
+# Loading Epias Energy Consumption Data
+
+```{r}
+data = read.csv("D:/2022_yedek/Tolga/data/elektrik_tuketim.csv",check.names = F)
+rbind(head(data,5),tail(data,5))
+```
+
+
+* The data shows hourly electricity consumption from 2015 to 2022.
+
+
+* First let's prepare the historical column in the data according to the format we can analyze
+
+```{r}
+data$Tarih = as.Date(data$Tarih,format = "%d.%m.%Y") 
+data$HourlyDate = seq(as.POSIXct("2015-12-31 00:00:00")
+                      ,as.POSIXct("2022-05-14 16:00:00")
+                      ,by = "hour")   # Create new date column with hour and date
+
+colnames(data)[1:3] = c("Tarih","Saat","Tuketim")
+data$Tuketim = sub(".", "",
+                   data$Tuketim,
+                   fixed = TRUE) # change some character problem from numeric data
+data$Tuketim = sub(",",".",
+                   data$Tuketim,
+                   fixed = TRUE) # another one..
+
+data$Tuketim = as.numeric(data$Tuketim) # finally transforming numerical data
+
+
+ggplot(data,aes(x = HourlyDate,y = Tuketim))+
+  geom_line() # first look consumption data
+```
+* One date has zero consumption value. Let's see what date it is.
+
+
+```{r}
+data%>%filter(Tuketim == 0)
+```
+
+* We have a zero value on 2016-03-27 02:00. I did some research but I don't know why.
+
+* Anyway, now let's look at what hours the consumption increases.
+
+```{r,fig.height=9,fig.width=15}
+ggplot(data,aes(x = HourlyDate,y = Tuketim,colour = Saat))+
+  geom_line()+
+  scale_fill_viridis_b()+
+  theme_economist()# line plot with hour
+```
+
+*The blue line shows midday hours. 
+*The hours with the highest consumption are midday hours.
+*This may be due to the fact that it is both the highest temperature and working hours.
+*And the green line shows the hours between 04:00 and 10:00.
+These are the hours with the lowest consumption. The reason for this may be reasons such as the inactivity of people.
+
+
+```{r,warning=FALSE,message=FALSE,fig.height=8,fig.width=18}
+data%>%group_by(Saat)%>%summarise(OrtalamaTuketim = mean(Tuketim))%>%
+  ggplot(aes(x = Saat,y = OrtalamaTuketim,fill = Saat))+geom_bar(stat = "identity")+
+  theme_fivethirtyeight()+
+  ggtitle(label = "Mean Hourly Consumption")
+
+
+data = data%>%mutate(Day = day(Tarih),
+              Month = month(Tarih),
+              Year = year(Tarih))
+g = data%>%group_by(Year,Month,Day)%>%
+  summarise(Mean = mean(Tuketim)) # Create mean daily consumption data.
+
+g$Tarih = as.Date(paste0(g$Year,"-",g$Month,"-",g$Day),format = "%Y-%m-%d")
+```
+
+* In the average hourly consumption graph, there is a decrease after 00:00 until 06:00. After 06:00, the amount of consumption increases continuously and the maximum point is 11:00.
+
+## Creating daily mean consumption data
+
+```{r}
+ggplot(g,aes(x = Tarih,y = Mean,color = "red"))+
+  geom_line()+
+  theme_economist()+
+  ggtitle(label  = "Mean Daily Electric Consumption from EPİAS")+
+  theme(legend.position = "none")
+```
+
+And now we look sma and coloring by month.
+
+```{r,fig.height=8,fig.width=15}
+ggplot(g,aes(x = Tarih,y = Mean,colour = Month))+
+  geom_line()+
+  scale_fill_viridis_b()+
+  geom_ma(ma_fun = EMA,n = 48,size = 1.5,color = "red")+
+  theme_economist_white(horizontal = T)
+
+```
+Consumption always peaks as we approach the last months of the year.
+This may be caused by the cooling consumption that occurs with the arrival of the summer season and the increase in temperatures.
+However, in some years (for example, 2020), the months when consumption is at its peak coincide with the winter season.
+
+```{r,fig.height=8,fig.width=15}
+g%>%group_by(Month)%>%summarise(OrtalamaTuketim = mean(Mean))%>%
+  ggplot(aes(x = month(Month,label = T),y = OrtalamaTuketim,fill = Month))+geom_bar(stat = "identity")+
+  ggtitle(label = "Mean Monthly Consumption")+
+  theme_fivethirtyeight()
+```
+The months with the highest consumption are July and August, when the summer temperature is also the highest. 
+In addition, the lowest month belongs to the month of May, which we can call the transition month between winter and summer.
+
+# Do forecast!
+
+```{r,fig.height=15,fig.width=20,warning=FALSE,message=FALSE}
+ts_data = ts(g$Mean,
+             start = c(2015,yday(g$Tarih[1])),
+             frequency = 365) # Creating ts object for forecast package.
+
+
+
+
+plot_with = function(ts_object,seasonality) # Create function and show acf,pacf and data plot!
+{
+  if(seasonality=="True")
+    {
+      s1 = ggseasonplot(ts_data,size = 1)+theme_solarized()
+    }
+ 
+  
+
+  p1 = autoplot(ts_object,color = "red")+
+    autolayer(SMA(ts_object,n = 30)%>%ts(start = c(2015,yday(g$Tarih[1])),
+             frequency = 365),series = "30MA",size = 1.1)+
+    autolayer(SMA(ts_object,n = 7)%>%ts(start = c(2015,yday(g$Tarih[1])),
+             frequency = 365),series = "7MA",size = 1.1)+
+    xlab("Date")+ylab("Demand(KwH)")+
+    theme_economist()+
+    theme(legend.position = "none")+
+    ggtitle("Mean Daily Electric Demand from 2015 to 2022")
+  
+  p2 = ggAcf(ts_object,lag.max = 60,size = 1)+
+    xlab("Lag")+ylab("Autocorrelation")+
+    theme_fivethirtyeight()+
+    ggtitle("Autocorrelation")
+  
+  p3 = ggPacf(ts_object,lag.max = 60,size = 1)+
+    xlab("Lag")+ylab("Autocorrelation")+
+    theme_fivethirtyeight()+
+    ggtitle("Partial Autocorrelation")
+  
+  if(seasonality == "True")
+  {
+    return(grid.arrange(p1,s1,arrangeGrob(p2,p3,ncol = 2)))
+  }else
+  {
+    return(grid.arrange(p1,arrangeGrob(p2,p3,ncol = 2)))
+  }
+    
+  
+}
+
+plot_with(ts_object = ts_data,seasonality = "True")
+```
+
+When the seasonality graph is examined, there is seasonality in the data every year, but there is no obvious situation for the trend, we will look at it later.
+In the pacf graph, on the other hand, the pacf value increases sharply at every 7th lag.
+
+* Let's examine the trend variable with a regression model.
+
+```{r}
+tslm(ts_data~trend)%>%summary()
+```
+
+Since the trend variable is not significant, we can say that there is no obvious trend in the series.
+
+
+## Check Stationary
+
+```{r fig.height=10,fig.width=15,warning=FALSE,message=FALSE}
+non_diff = ur.df(ts_data,selectlags = "AIC")%>%summary()
+cat("Test Statistics for non Differencing : ",attr(non_diff,"teststat")[1],
+       '\n',"Critical Values : ",attr(non_diff,"cval"))
+one_diff = urca::ur.df(ts_data%>%diff(),selectlags = "AIC")%>%summary()
+cat('\n',"Test Statistics for 1 Differencing : ",attr(one_diff,"teststat")[1],
+       '\n',"Critical Values : ",attr(one_diff,"cval"))
+
+plot_with(ts_object = diff(ts_data),seasonality = "False")
+```
+
+The series is not stationary. Therefore, we made it stationary with the 1st difference operation. This is a prerequisite for the Arima model.
+According to the acf and pacf graphs of the difference series, I think the p (AR) parameter is 7, but I am not sure about the q (MA) parameter. I will try this.
+Let's separate the last 2 weeks as the test set.
+
+
+```{r}
+train = window(ts_data,end = c(2022,122))
+test = window(ts_data,start = c(2022,123))
+
+model1 = Arima(train,order = c(7,1,6)) # I tried and found the most optimal q parameter to be 6.
+predict1 = forecast(model1,
+                   h = length(test),fan = T)
+
+forecast::accuracy(predict1$mean,test) # mae 3329.389
+
+
+model = auto.arima(train,
+                   d = 1,
+                   start.p = 5,
+                   allowdrift = T,
+                   allowmean = T,
+                   seasonal = T,
+                   stepwise = F,
+                   approximation = F,
+                   trace = T) # Auto arima 
+
+
+
+predict = forecast(model,
+                   h = length(test),fan = T)
+
+forecast::accuracy(predict$mean,test)
+```
+
+```{r}
+# Arima with seasonal and log transformation-Stepwise
+model2 = auto.arima(log1p(train),
+                   start.p = 5,
+                   d = 1,
+                   seasonal = T,
+                   stepwise = T,
+                   approximation = F,
+                   trace = T,max.P = 7,start.P = 5)
+predict2 = forecast(model2,
+                   h = length(test),fan = F)
+
+forecast::accuracy(predict2$mean%>%expm1(),test)
+```
+
+## Compare forecast
+
+```{r,fig.height=6,fig.width=13}
+autoplot(test,series = "Test",size = 1)+
+  autolayer(predict1,series = "ARIMA(7,1,6)",PI = F,size = 1)+
+  autolayer(predict$mean,series = "AutoArima(0,1,5)",PI = F,size = 1)+
+  autolayer(predict2$mean%>%expm1(),series = "AutoArima(5,1,2)")+
+  theme_hc()+
+  ggtitle("Forecasting vs TestSeries")+ylab("Consumption Value")
+```
+
+If we look at the mae criterion and examine the graph, the ARIMA(7,1,6) model made the most compatible estimate.
+No model has been able to capture the decline in the first 7 days well.
+
+* Let's tabulate the results and look again
+
+```{r}
+acc_log_auto = forecast::accuracy(predict2$mean%>%expm1(),test)[3]
+acc_auto = forecast::accuracy(predict$mean,test)[3]
+acc_arima = forecast::accuracy(predict1$mean,test)[3]
+result = data.frame("AutoWithLog(5,1,2)" = acc_log_auto,
+                    "AutoArima(0,1,5)" = acc_auto,
+                    "Arima(7,1,6)" = acc_arima,check.names = F)%>%t()%>%as.data.frame()
+
+result
+ggplot(result,aes(x = result%>%row.names(),y = V1,fill = result%>%row.names()))+
+  geom_bar(stat = "identity")+
+  xlab("Models")+ylab("MAE")+
+  theme_fivethirtyeight()+
+  theme(legend.position = "none")+
+  ggtitle(label = "",subtitle = "Comparison of Arima Models(MAE)")+
+  coord_flip()
+  
+```
+
+We have determined the most compatible model.
+Now let's model over the whole series and predict the next week.
+
+```{r}
+full_model = Arima(ts_data,
+                   order = c(7,1,6))
+
+predict = forecast(full_model,
+                   h = 8,fan = F)
+
+autoplot(window(ts_data,start = c(2022,1)),series = "History")+
+  autolayer(predict$mean,series = "Forecast")+
+  theme_hc()+
+  ggtitle("Forecasting Next 7 Day")+ylab("Demand Value")
+```
+
+
+# Modeltime
+
+Likewise, let's create estimates using the modeltime package.
+I will split the data the same way and use the prophet, arima, arima boost and linear reg model here.
+
+```{r,fig.height=8,fig.width=12}
+g = g%>%as.data.frame()%>%select(Mean,Tarih)
+training = g[(1:(dim(g)[1]-14)),]
+testing = g[-(1:(dim(g)[1]-14)),]
+
+arima_model = arima_reg()%>%
+  set_engine("auto_arima")%>%
+  fit(Mean~Tarih,training)
+
+prophet_model = prophet_reg(seasonality_yearly = T,seasonality_daily = T)%>%
+  set_engine("prophet")%>%
+  fit(Mean~Tarih,data = training)
+
+tslm_model = linear_reg()%>%
+  set_engine("lm")%>%
+  fit(Mean~as.numeric(Tarih)+factor(month(Tarih,label = T)),data = training)
+
+arima_boost = arima_boost(learn_rate =.1 ,min_n = 5)%>%
+  set_engine("auto_arima_xgboost")%>%
+  fit(Mean~Tarih+factor(month(Tarih,label = T))+factor(day(Tarih)),data = training)
+  
+
+f_table = modeltime_table(
+  arima_model,
+  arima_boost,
+  prophet_model,
+  tslm_model
+)
+
+f_table%>%modeltime_calibrate(testing)%>%
+  modeltime_accuracy()
+
+```
+
+According to the model results, the linear model gave the lowest mae value, but we can subtract it because it makes straight predictions.
+The most compatible estimation model after the linear model was arima(2,0,0)(2,1,0).
+
+and plotting
+
+```{r}
+f_table%>%modeltime_calibrate(testing)%>%
+  modeltime_forecast(actual_data = testing)%>%
+  plot_modeltime_forecast()
+```
+
+
+Except for the linear model, all models are close to each other and have the same pattern.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
